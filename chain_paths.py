@@ -21,12 +21,13 @@
 #        Workaround for cubicsuperpath.parsePath/formatPath limitation.
 #        Started python3 compatibility.
 # 2020-05-27 vi, V0.7 -- Upgrade to Inkscape 1.0. Write debug info to inkex debug dialog.
+# 2025-11-26 jm, V0.8 -- Upgrade to Inkscape 1.4
 
 from __future__ import print_function
 
-__version__ = '0.7'        # Keep in sync with chain_paths.inx ca line 22
+__version__ = '0.8'        # Keep in sync with chain_paths.inx ca line 22
 __author__ = 'Juergen Weigert <juergen@fabmail.org>'
-__credits__ = ['Juergen Weigert', 'Veronika Irvine']
+__credits__ = ['Juergen Weigert', 'Veronika Irvine', 'Jona Mainberger']
 
 import sys, os, shutil, time, logging, tempfile, math
 import re
@@ -169,8 +170,9 @@ class ChainPaths(inkex.Effect):
       return
 
     segments = []
-    for id in self.svg.selected:
-      node = self.svg.selected[id]
+    for element in self.svg.selection:
+      node = element
+      id = element.get_id()
       if node.tag != inkex.addNS('path', 'svg'):
         inkex.errormsg(_("Object "+ str(id) + " is not a path. Try\n  - Path->Object to Path\n  - Object->Ungroup"))
         return
@@ -204,8 +206,9 @@ class ChainPaths(inkex.Effect):
     # chain the segments
     obsoleted = 0
     remaining = 0
-    for id in self.svg.selected:
-      node = self.svg.selected[id]
+    for element in self.svg.selection:
+      node = element
+      id = node.get_id()
       # path_style = simplestyle.parseStyle(node.get('style'))
       path_d = inkex.paths.CubicSuperPath(inkex.paths.Path(node.get('d')))
       # ATTENTION: for parsePath() it is the same, if first and last point coincide, or if the path is really closed.
