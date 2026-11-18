@@ -1,6 +1,17 @@
 inkscape-chain-paths
 ===================
 
+> **This fork (branch `inkscape-1.4`) works in Inkscape 1.4** and fixes
+> chaining bugs: curves were lost when a loop closed, open chains could
+> get closed, lone movetos crashed it, and the snap distance was off in
+> documents drawn in mm. It includes
+> [PR #9](https://github.com/fablabnbg/inkscape-chain-paths/pull/9) by
+> Treeed. Tests: `python3 -m pytest tests/` (needs inkex 1.4). Install:
+> copy `chain_paths.inx` and `chain_paths.py` into
+> `~/.config/inkscape/extensions/` (Linux) or the folder shown in
+> Inkscape under Edit > Preferences > System > User extensions.
+> With nothing selected it chains every path in the drawing.
+
 An inkscape extension to combine paths. Like really combining path snippets
 into longer paths. The stock inkscape path operation "combine" does not do that.
 It only creates a single path object consisting of multiple distinct segments.
