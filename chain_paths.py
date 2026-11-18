@@ -38,7 +38,7 @@ debug = False
 # search path, so that inkscape libraries are found when we are standalone.
 sys_platform = sys.platform.lower()
 if sys_platform.startswith('win'):        # windows
-  sys.path.append('C:\Program Files\Inkscape\share\extensions')
+  sys.path.append(r'C:\Program Files\Inkscape\share\extensions')
 elif sys_platform.startswith('darwin'):   # mac
   sys.path.append('/Applications/Inkscape.app/Contents/Resources/extensions')
 else:                                     # linux
@@ -53,10 +53,45 @@ inkex.localization.localize()
 from optparse import SUPPRESS_HELP
 
 def uutounit(self, nn, uu):
+  # viewport_to_unit follows the viewBox (unittouu does not: in a
+  # document drawn in mm it is 3.78 times off)
+  if hasattr(self.svg, 'viewport_to_unit'):
+    return self.svg.viewport_to_unit(str(nn)+uu)
   try:
     return self.svg.unittouu(str(nn)+uu)
   except:
     return inkex.unittouu(str(nn)+uu)
+
+
+def closed_subpaths(d):
+  """ For each subpath of d (as CubicSuperPath splits it), whether it ends with z. """
+  closed = []
+  for cmd in inkex.paths.Path(d):
+    if cmd.letter in 'Mm':
+      closed.append(False)
+    elif cmd.letter in 'Zz' and closed:
+      closed[-1] = True
+  return closed
+
+
+def fmt(v):
+  return ('%.6f' % v).rstrip('0').rstrip('.')
+
+
+def format_chains(chains):
+  """ Path data for chains of [handle_in, point, handle_out] nodes, each
+      with its closed flag. Straight pieces are written as lines. """
+  out = []
+  for chain, closed in chains:
+    out.append('M %s,%s' % (fmt(chain[0][1][0]), fmt(chain[0][1][1])))
+    for a, b in zip(chain, chain[1:]):
+      if a[2] == a[1] and b[0] == b[1]:
+        out.append('L %s,%s' % (fmt(b[1][0]), fmt(b[1][1])))
+      else:
+        out.append('C %s,%s %s,%s %s,%s' % tuple(fmt(v) for v in (a[2][0], a[2][1], b[0][0], b[0][1], b[1][0], b[1][1])))
+    if closed:
+      out.append('Z')
+  return ' '.join(out)
 
 class ChainPaths(inkex.Effect):
   """
@@ -137,6 +172,14 @@ class ChainPaths(inkex.Effect):
     return seg
 
 
+  def is_reversal(self, sub):
+    """ A 3-node subpath that goes somewhere and retraces its way back
+        (a line drawn twice). Only then may the way back be dropped: two
+        different curves meeting at both ends (a lens) are not one. """
+    a, b, c = sub
+    return (self.near_ends(c[1], a[1]) and self.near_ends(b[2], b[0]) and
+            self.near_ends(c[0], a[2]))
+
   def near_ends(self, end1, end2):
     """ requires self.eps_sq to be the square of the near distance """
     dx = end1[0] - end2[0]
@@ -165,9 +208,14 @@ class ChainPaths(inkex.Effect):
     if self.chain_epsilon < 0.001: self.chain_epsilon = 0.001        # keep a minimum.
     self.eps_sq = self.chain_epsilon * self.unit_factor * self.chain_epsilon * self.unit_factor
 
-    if not len(self.svg.selected.items()):
-      inkex.errormsg(_("Please select one or more objects."))
-      return
+    if not len(self.svg.selection):
+      # nothing selected (or run from the command line, which passes no
+      # selection): every path in the drawing, but not those in defs
+      paths = self.svg.xpath('//svg:path[not(ancestor::svg:defs)]')
+      if not paths:
+        inkex.errormsg(_("Please select one or more objects."))
+        return
+      self.svg.selection.set(*paths)
 
     segments = []
     for element in self.svg.selection:
@@ -187,11 +235,15 @@ class ChainPaths(inkex.Effect):
         # the _OUT handles at the end of the path are ignored. The data structure has them identical to their points.
         #
         if debug: inkex.utils.debug("   sub=" + str(sub))
+        if len(sub) < 2:
+          # a lone moveto draws nothing; closing it as a loop crashed
+          self.set_segment_done(id, sub_idx, "lone point")
+          continue
         end1 = [sub[ 0][1][0], sub[ 0][1][1]]
         end2 = [sub[-1][1][0], sub[-1][1][1]]
 
         # Remove trivial self revesal when building candidate segments list.
-        if ((len(sub) == 3) and self.near_ends(end1, end2)):
+        if ((len(sub) == 3) and self.is_reversal(sub)):
           if debug: inkex.utils.debug("dropping segment from self-reversing path, length:"+str(len(sub)))
           sub.pop()
           end2 = [sub[-1][1][0], sub[-1][1][1]]
@@ -211,8 +263,9 @@ class ChainPaths(inkex.Effect):
       id = node.get_id()
       # path_style = simplestyle.parseStyle(node.get('style'))
       path_d = inkex.paths.CubicSuperPath(inkex.paths.Path(node.get('d')))
-      # ATTENTION: for parsePath() it is the same, if first and last point coincide, or if the path is really closed.
-      path_closed = True if re.search("z\s*$", node.get('d')) else False
+      # which subpaths were closed with z: they stay closed even when
+      # close_loops is off. Each chain gets its own closed flag.
+      was_closed = closed_subpaths(node.get('d'))
       new = []
       cur_idx = -1
       for chain in path_d:
@@ -230,7 +283,7 @@ class ChainPaths(inkex.Effect):
           end2 = [chain[-1][1][0], chain[-1][1][1]]
 
           # Remove trivial self revesal when doing the actual chain operation.
-          if ((len(chain) == 3) and self.near_ends(end1, end2)):
+          if ((len(chain) == 3) and self.is_reversal(chain)):
             chain.pop()
             end2 = [chain[-1][1][0], chain[-1][1][1]]
 
@@ -269,26 +322,25 @@ class ChainPaths(inkex.Effect):
           # Finally, we can check, if the resulting path is a closed path:
           # Closing a path here, isolates it from the rest.
           # But as we prefer to make the chain as long as possible, we close late.
-          if self.near_ends(end1, end2) and not path_closed and self.close_loops:
+          started_closed = cur_idx < len(was_closed) and was_closed[cur_idx]
+          chain_closed = False
+          if len(chain) >= 2 and self.near_ends(end1, end2) and (self.close_loops or started_closed):
               if debug: inkex.utils.debug("closing closeable loop " +str(id))
               if self.snap_ends:
-                  # move first point to mid position
-                  x1n = (chain[0][1][0] + chain[-1][1][0]) * 0.5
-                  y1n = (chain[0][1][1] + chain[-1][1][1]) * 0.5
-                  chain[0][1][0], chain[0][1][1] = x1n, y1n
-                  # merge handle of the last point to the handle of the first point
-                  dx0e = chain[-1][0][0] - chain[-1][1][0]
-                  dy0e = chain[-1][0][1] - chain[-1][1][1]
-                  if debug: inkex.utils.debug("handle diff: "+ str(dx0e) + str(dy0e))
-                  # FIXME: this does not work. cubicsuperpath.formatPath() ignores this handle.
-                  chain[0][0][0], chain[0][0][1] = x1n+dx0e, y1n+dy0e
-                  # drop last point
-                  chain.pop()
-                  end2 = [chain[-1][1][0], chain[-1][1][1]]
-              path_closed = True
+                  # move both ends to their mid position, handles along;
+                  # the last piece stays (dropping it, and letting z
+                  # draw a straight line instead, lost curves)
+                  xm = (chain[0][1][0] + chain[-1][1][0]) * 0.5
+                  ym = (chain[0][1][1] + chain[-1][1][1]) * 0.5
+                  for node_ in (chain[0], chain[-1]):
+                      dx, dy = xm - node_[1][0], ym - node_[1][1]
+                      for pt in node_:
+                          pt[0] += dx
+                          pt[1] += dy
+              chain_closed = True
               self.chained_count +=1
 
-          new.append(chain)
+          new.append((chain, chain_closed))
 
       if not len(new):
         #node.clear()
@@ -297,9 +349,7 @@ class ChainPaths(inkex.Effect):
         if debug: inkex.utils.debug("Path node obsoleted: " +str(id))
       else:
         remaining += 1
-        # BUG: All previously closed loops, are open, after we convert them back with cubicsuperpath.formatPath()
-        p_fmt = str(inkex.paths.Path(inkex.paths.CubicSuperPath(new).to_path().to_arrays()))
-        if path_closed: p_fmt += " z"
+        p_fmt = format_chains(new)
         if debug: inkex.utils.debug("new path: "+str(p_fmt))
         node.set('d', p_fmt)
 
